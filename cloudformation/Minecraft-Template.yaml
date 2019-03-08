@@ -1,0 +1,359 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Deploy a Minecraft Server & Alexa Skill
+
+Parameters:
+
+  pKeyName:
+    Description: KeyName for instances
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: '-'
+
+  pHostedZoneId:
+    Description: Hosted Zone ID to register the public IP
+    Type: AWS::Route53::HostedZone::Id
+    Default: '-'
+
+  pAdminIpAddress:
+    Type: String
+
+  pServiceFQDN:
+    Description: FQDN of the instance Host. domain name must match the Hosted Zone ID
+    Type: String
+    Default: ''
+
+  pBedtimeCron:
+    Description: Cron Expression in GMT
+    Type: String
+    Default: cron(0 01 * * ? *)
+
+  InstanceType:
+    Description: Instance Type
+    Type: String
+    Default: t3.micro
+
+  ImageId:
+    Description: AMI ID for AmazonLinux2 in the Region you're deploying in
+    Type: AWS::EC2::Image::Id
+    Default: ami-02da3a138888ced85
+
+Resources:
+
+  ServerInstance:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'
+        Timeout: PT15M
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: !Ref InstanceType
+      SecurityGroups:
+        - !Ref ServerSecurityGroup
+      KeyName: !Ref 'pKeyName'
+      IamInstanceProfile: !Ref ServerInstanceProfile
+      Tags:
+      - Key: Name
+        Value:
+          Ref: AWS::StackName
+      UserData:
+        Fn::Base64:
+          !Sub |
+              #!/bin/bash -x
+
+              #Log Execution to Instance Console
+              exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+
+
+
+              /opt/aws/bin/cfn-signal -e $? --region ${AWS::Region} --stack ${AWS::StackName} --resource ServerInstance
+
+  ServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow external Addresses to SSH to Instance Host
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+          CidrIp: !Ref 'pAdminIpAddress'
+        - IpProtocol: tcp
+          FromPort: '500'
+          ToPort: '500'
+          CidrIp: !Ref 'pAdminIpAddress'
+      Tags:
+        - Key: Name
+          Value: MinecraftServerSecurityGroup
+
+  ServerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref ServerInstanceRole
+
+  #
+  # IAM Roles
+  #
+  ServerInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+      Policies:
+      - PolicyName: CloudWatch
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Action:
+            - cloudwatch:*
+            Effect: Allow
+            Resource: '*'
+      - PolicyName: EC2DescribeInstances
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Action:
+            - ec2:Describe*
+            Effect: Allow
+            Resource: '*'
+      - PolicyName: logs
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Resource: '*'
+            Action:
+            - logs:*
+            Effect: Allow
+      - PolicyName: Route53
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Resource: !Sub arn:aws:route53:::hostedzone/${pHostedZoneId}
+            Action:
+            - Route53:ChangeResourceRecordSets
+            Effect: Allow
+
+  LambdaInvocationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - events.amazonaws.com
+            - sns.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: /
+      Policies:
+      - PolicyName: ExecuteLambda
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Action:
+            - lambda:InvokeFunction
+            Effect: Allow
+            Resource:
+              - !GetAtt DNSUpdateLambda.Arn
+              - !GetAtt StartStopServerLambda.Arn
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: /
+      Policies:
+      - PolicyName: CloudWatch
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Action:
+            - cloudwatch:*
+            Effect: Allow
+            Resource: '*'
+      - PolicyName: EC2DescribeInstances
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Action:
+            - ec2:Describe*
+            Effect: Allow
+            Resource: '*'
+      - PolicyName: logs
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Resource: '*'
+            Action:
+            - logs:*
+            Effect: Allow
+      - PolicyName: Route53
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Resource: !Sub arn:aws:route53:::hostedzone/${pHostedZoneId}
+            Action:
+            - Route53:ChangeResourceRecordSets
+            Effect: Allow
+      - PolicyName: StartStopInstances
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Action:
+            - ec2:StopInstances
+            - ec2:StartInstances
+            Effect: Allow
+            Resource:
+              - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${ServerInstance}
+
+  #
+  # Automatic Server Shutdown at bedtime
+  #
+  StartStopServerLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Update the DNS entry when the Minecraft server is started
+      Runtime: python3.7
+      Handler: index.lambda_handler
+      Timeout: '80'
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          from botocore.exceptions import ClientError
+          import sys
+          import os
+
+          import logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.DEBUG)
+          # Quiet Boto3
+          logging.getLogger('botocore').setLevel(logging.WARNING)
+          logging.getLogger('boto3').setLevel(logging.WARNING)
+
+          def lambda_handler(event, context):
+              logger.debug("Received event: " + json.dumps(event, sort_keys=True))
+              message = json.loads(event['Records'][0]['Sns']['Message'])
+              logger.info("Received message: " + json.dumps(message, sort_keys=True))
+
+              client = boto3.client('ec2')
+              instance_id = os.environ['INSTANCE_ID']
+
+              if message['command'] == "stop":
+                logger.info(f"Stopping Instance {os.environ['INSTANCE_ID']}")
+                response = client.stop_instances(InstanceIds=[instance_id])
+                logger.debug(response)
+              elif message['command'] == "start":
+                logger.info(f"Starting Instance {os.environ['INSTANCE_ID']}")
+                response = client.start_instances(InstanceIds=[instance_id])
+                logger.debug(response)
+              else:
+                logger.error(f"Invalid Command {message['command']}")
+          ### End Of Function ###
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          HOSTED_ZONE: !Ref pHostedZoneId
+          SERVER_FQDN: !Sub "${AWS::StackName}.{pServiceFQDN}"
+          INSTANCE_ID: !Ref ServerInstance
+
+  ShutdownServerRule:
+    Type: "AWS::Events::Rule"
+    Properties:
+      Description: "Shutdown Minecraft Server at bedtime"
+      ScheduleExpression: !Ref pBedtimeCron
+      Targets:
+      - Arn: !GetAtt StartStopServerLambda.Arn
+        Id: TargetFunctionV1
+        Input:  !Sub |
+          {"command": "stop"}
+
+  ShutdownServerLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt StartStopServerLambda.Arn
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ShutdownServerRule.Arn
+      Action: lambda:invokeFunction
+
+  #
+  # Resources to set DNS on Instance Start
+  #
+  DNSUpdateLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Update the DNS entry when the Minecraft server is started
+      Runtime: python3.7
+      Handler: index.lambda_handler
+      Timeout: '80'
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          from botocore.exceptions import ClientError
+          import sys
+          import os
+
+          def lambda_handler(event, context):
+              print("Received event: " + json.dumps(event, sort_keys=True))
+
+          def handle_error(action, username, ResponseMetadata):
+              raise Exception("ERROR" + action + " User: " + username + " Details: " + ResponseMetadata)
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          HOSTED_ZONE: !Ref pHostedZoneId
+          SERVER_FQDN: !Sub "${AWS::StackName}.{pServiceFQDN}"
+          INSTANCE_ID: !Ref ServerInstance
+
+  Ec2StartStopRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Send Instance State Change notifications to Slack (via Lambda)
+      EventPattern:
+        source:
+        - aws.ec2
+        detail-type:
+        - EC2 Instance State-change Notification
+      State: ENABLED
+      RoleArn: !GetAtt LambdaInvocationRole.Arn
+      Targets:
+      - Arn: !GetAtt DNSUpdateLambda.Arn
+        Id: TargetFunctionV1
+
+  DNSUpdateLambdaPermissionEc2StartStopRule:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt DNSUpdateLambda.Arn
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt Ec2StartStopRule.Arn
+      Action: lambda:invokeFunction
+
+
+
+Outputs:
+  StackName:
+    Value: !Ref 'AWS::StackName'
+  PublicHostname:
+    Value: !Sub "${AWS::StackName}.{pServiceFQDN}"
+

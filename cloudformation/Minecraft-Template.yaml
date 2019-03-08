@@ -3,6 +3,10 @@ Description: Deploy a Minecraft Server & Alexa Skill
 
 Parameters:
 
+  pBucketName:
+    Description: S3 Bucket with Backups & logs
+    Type: String
+
   pKeyName:
     Description: KeyName for instances
     Type: AWS::EC2::KeyPair::KeyName
@@ -26,10 +30,26 @@ Parameters:
     Type: String
     Default: cron(0 01 * * ? *)
 
+  pLoadWorld:
+    Description: S3 Object Path to load (instead of creating a new world)
+    Type: String
+    Default: None
+
+  pServerName:
+    Description: Internal name of the minecraft server (used by msm)
+    Type: String
+    Default: minecraft
+
+  pMinecraftVersion:
+    Description: Version of the minecraft server (used by msm)
+    Type: String
+    Default: minecraft/1.7.0
+
+
   InstanceType:
     Description: Instance Type
     Type: String
-    Default: t3.micro
+    Default: t3.small
 
   ImageId:
     Description: AMI ID for AmazonLinux2 in the Region you're deploying in
@@ -60,12 +80,34 @@ Resources:
           !Sub |
               #!/bin/bash -x
 
-              #Log Execution to Instance Console
-              exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+              S3OBJECT=${pLoadWorld}
+              S3BUCKET=${pBucketName}
 
+              curl https://raw.githubusercontent.com/jchrisfarris/minecraft/master/scripts/install.sh | bash && \
+              echo "msm ${pServerName} start" >> /etc/rc.local
+              if [ $? -ne 0 ] ; then
+                /opt/aws/bin/cfn-signal -e $? --region ${AWS::Region} --stack ${AWS::StackName} --resource ServerInstance
+              fi
 
+              # Now do we restore or create new?
+              if [ $S3OBJECT != "None" ] ; then
+                mkdir /home/msm/servers && \
+                aws s3 cp s3://$S3BUCKET/$S3OBJECT /home/msm/servers/restore.zip && \
+                cd /home/msm/servers && \
+                unzip restore.zip && \
+                chown -R minecraft:minecraft /home/msm && \
+                msm ${pServerName} start
+                # /opt/aws/bin/cfn-signal -e $? --region ${AWS::Region} --stack ${AWS::StackName} --resource ServerInstance
+              else
+                msm server create ${pServerName} && \
+                msm ${pServerName} jar minecraft && \
+                echo "msm-version=${pMinecraftVersion}" >> /home/msm/servers/${pServerName}/server.properties && \
+                echo eula=true > /home/msm/servers/${pServerName}/eula.txt && \
+                msm ${pServerName} start
+                # /opt/aws/bin/cfn-signal -e $? --region ${AWS::Region} --stack ${AWS::StackName} --resource ServerInstance
+              fi
 
-              /opt/aws/bin/cfn-signal -e $? --region ${AWS::Region} --stack ${AWS::StackName} --resource ServerInstance
+              /opt/aws/bin/cfn-signal -e 0 --region ${AWS::Region} --stack ${AWS::StackName} --resource ServerInstance
 
   ServerSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -76,10 +118,12 @@ Resources:
           FromPort: '22'
           ToPort: '22'
           CidrIp: !Ref 'pAdminIpAddress'
+          Description: Remote Admin
         - IpProtocol: tcp
-          FromPort: '500'
-          ToPort: '500'
+          FromPort: '25565'
+          ToPort: '25565'
           CidrIp: !Ref 'pAdminIpAddress'
+          Description: Minecraft
       Tags:
         - Key: Name
           Value: MinecraftServerSecurityGroup
@@ -90,6 +134,16 @@ Resources:
       Path: /
       Roles:
         - !Ref ServerInstanceRole
+
+  DNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref pHostedZoneId
+      Name: !Sub "${AWS::StackName}.${pServiceFQDN}"
+      ResourceRecords:
+        - !GetAtt ServerInstance.PublicIp
+      TTL: 30
+      Type: A
 
   #
   # IAM Roles
@@ -141,6 +195,16 @@ Resources:
           - Resource: !Sub arn:aws:route53:::hostedzone/${pHostedZoneId}
             Action:
             - Route53:ChangeResourceRecordSets
+            Effect: Allow
+      - PolicyName: S3Access
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Resource:
+            - !Sub arn:aws:s3:::${pBucketName}
+            - !Sub arn:aws:s3:::${pBucketName}/*
+            Action:
+            - s3:*
             Effect: Allow
 
   LambdaInvocationRole:
@@ -252,8 +316,9 @@ Resources:
           logging.getLogger('boto3').setLevel(logging.WARNING)
 
           def lambda_handler(event, context):
-              logger.debug("Received event: " + json.dumps(event, sort_keys=True))
-              message = json.loads(event['Records'][0]['Sns']['Message'])
+              # logger.debug("Received event: " + json.dumps(event, sort_keys=True))
+              # message = json.loads(event['Records'][0]['Sns']['Message'])
+              message = event
               logger.info("Received message: " + json.dumps(message, sort_keys=True))
 
               client = boto3.client('ec2')
@@ -314,16 +379,53 @@ Resources:
           import sys
           import os
 
-          def lambda_handler(event, context):
-              print("Received event: " + json.dumps(event, sort_keys=True))
+          import logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.DEBUG)
+          # Quiet Boto3
+          logging.getLogger('botocore').setLevel(logging.WARNING)
+          logging.getLogger('boto3').setLevel(logging.WARNING)
 
-          def handle_error(action, username, ResponseMetadata):
-              raise Exception("ERROR" + action + " User: " + username + " Details: " + ResponseMetadata)
+          def lambda_handler(event, context):
+              logger.debug("Received event: " + json.dumps(event, sort_keys=True))
+
+              ec2_client = boto3.client('ec2')
+              route53_client = boto3.client('route53')
+              instance_id = os.environ['INSTANCE_ID']
+
+              try:
+                if event['detail']['state'] == "running" and event['detail']['instance-id'] == instance_id:
+                  instance_deets = ec2_client.describe_instances(InstanceIds=[instance_id])['Reservations']['Instances'][0]
+                  if 'PublicIpAddress' not in instance_deets:
+                    raise Exception("No Public IP for Instance")
+                  else:
+                    response = route53_client.change_resource_record_sets(
+                      HostedZoneId=os.environ['HOSTED_ZONE'],
+                      ChangeBatch={
+                        'Changes': [
+                          {
+                            'Action':'UPSERT',
+                            'ResourceRecordSet': {
+                              'Name': os.environ['SERVER_FQDN'],
+                              'Type': 'A',
+                              'TTL': 30,
+                              'ResourceRecords': [{'Value': instance_deets['PublicIpAddress']}]
+                            }
+                          }
+                        ]
+                      }
+                    )
+                    logger.info(response)
+
+              except KeyError as e:
+                logger.error(f"KeyError: {e}")
+          ### End Of Function ###
+
       Role: !GetAtt LambdaExecutionRole.Arn
       Environment:
         Variables:
           HOSTED_ZONE: !Ref pHostedZoneId
-          SERVER_FQDN: !Sub "${AWS::StackName}.{pServiceFQDN}"
+          SERVER_FQDN: !Sub "${AWS::StackName}.${pServiceFQDN}"
           INSTANCE_ID: !Ref ServerInstance
 
   Ec2StartStopRule:

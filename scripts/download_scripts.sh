@@ -3,7 +3,7 @@
 # Script to update the scripts from Github
 
 REPOBASE="https://raw.githubusercontent.com/jchrisfarris/minecraft/master/scripts/"
-SCRIPTS="download_scripts.sh backup.sh restore.sh"
+SCRIPTS="download_scripts.sh backup.sh restore.sh new_world.sh"
 SCRIPT_HOME="/home/ec2-user/scripts"
 
 if [ ! -d $SCRIPT_HOME ] ; then

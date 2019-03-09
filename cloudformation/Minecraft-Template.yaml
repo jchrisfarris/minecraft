@@ -57,6 +57,9 @@ Parameters:
     Default: ami-02da3a138888ced85
 
 Resources:
+  #
+  # Server Instance itself
+  #
 
   ServerInstance:
     Type: AWS::EC2::Instance
@@ -82,6 +85,7 @@ Resources:
 
               S3OBJECT=${pLoadWorld}
               S3BUCKET=${pBucketName}
+              USER=ec2-user
 
               curl https://raw.githubusercontent.com/jchrisfarris/minecraft/master/scripts/install.sh | bash && \
               echo "msm ${pServerName} start" >> /etc/rc.local
@@ -91,20 +95,18 @@ Resources:
 
               # Now do we restore or create new?
               if [ $S3OBJECT != "None" ] ; then
-                mkdir /home/msm/servers && \
-                aws s3 cp s3://$S3BUCKET/$S3OBJECT /home/msm/servers/restore.zip && \
-                cd /home/msm/servers && \
-                unzip restore.zip && \
-                chown -R minecraft:minecraft /home/msm && \
+                mkdir /home/$USER/servers && \
+                aws s3 cp s3://$S3BUCKET/$S3OBJECT /home/$USER/servers/restore.zip && \
+                cd /home/$USER/servers && \
+                unzip -q restore.zip && \
+                chown -R $USER:$USER /home/$USER && \
                 msm ${pServerName} start
-                # /opt/aws/bin/cfn-signal -e $? --region ${AWS::Region} --stack ${AWS::StackName} --resource ServerInstance
               else
                 msm server create ${pServerName} && \
                 msm ${pServerName} jar minecraft && \
-                echo "msm-version=${pMinecraftVersion}" >> /home/msm/servers/${pServerName}/server.properties && \
-                echo eula=true > /home/msm/servers/${pServerName}/eula.txt && \
+                echo "msm-version=${pMinecraftVersion}" >> /home/$USER/servers/${pServerName}/server.properties && \
+                echo eula=true > /home/$USER/servers/${pServerName}/eula.txt && \
                 msm ${pServerName} start
-                # /opt/aws/bin/cfn-signal -e $? --region ${AWS::Region} --stack ${AWS::StackName} --resource ServerInstance
               fi
 
               /opt/aws/bin/cfn-signal -e 0 --region ${AWS::Region} --stack ${AWS::StackName} --resource ServerInstance
@@ -136,10 +138,11 @@ Resources:
         - !Ref ServerInstanceRole
 
   DNSRecord:
+    # We need this to create the DNS record when the instance is first created.
     Type: AWS::Route53::RecordSet
     Properties:
       HostedZoneId: !Ref pHostedZoneId
-      Name: !Sub "${AWS::StackName}.${pServiceFQDN}"
+      Name: !Sub "${pServiceFQDN}"
       ResourceRecords:
         - !GetAtt ServerInstance.PublicIp
       TTL: 30
@@ -367,7 +370,7 @@ Resources:
   DNSUpdateLambda:
     Type: AWS::Lambda::Function
     Properties:
-      Description: Update the DNS entry when the Minecraft server is started
+      Description: Update the DNS entry when the Minecraft server is started or stopped
       Runtime: python3.7
       Handler: index.lambda_handler
       Timeout: '80'
@@ -394,7 +397,10 @@ Resources:
               instance_id = os.environ['INSTANCE_ID']
 
               try:
-                if event['detail']['state'] == "running" and event['detail']['instance-id'] == instance_id:
+                if event['detail']['instance-id'] != instance_id:
+                  return(event) # Nothing to Do here
+
+                if event['detail']['state'] == "running" and :
                   instance_deets = ec2_client.describe_instances(InstanceIds=[instance_id])['Reservations']['Instances'][0]
                   if 'PublicIpAddress' not in instance_deets:
                     raise Exception("No Public IP for Instance")
@@ -416,6 +422,32 @@ Resources:
                       }
                     )
                     logger.info(response)
+                    return(event)
+
+                if event['detail']['state'] == "stopping":
+                  instance_deets = ec2_client.describe_instances(InstanceIds=[instance_id])['Reservations']['Instances'][0]
+                  if 'PublicIpAddress' not in instance_deets:
+                    raise Exception("No Public IP for Instance")
+                  else:
+                    response = route53_client.change_resource_record_sets(
+                      HostedZoneId=os.environ['HOSTED_ZONE'],
+                      ChangeBatch={
+                        'Changes': [
+                          {
+                            'Action':'DELETE',
+                            'ResourceRecordSet': {
+                              'Name': os.environ['SERVER_FQDN'],
+                              'Type': 'A',
+                              'TTL': 30,
+                              'ResourceRecords': [{'Value': instance_deets['PublicIpAddress']}]
+                            }
+                          }
+                        ]
+                      }
+                    )
+                    logger.info(response)
+                    return(event)
+
 
               except KeyError as e:
                 logger.error(f"KeyError: {e}")
@@ -425,7 +457,7 @@ Resources:
       Environment:
         Variables:
           HOSTED_ZONE: !Ref pHostedZoneId
-          SERVER_FQDN: !Sub "${AWS::StackName}.${pServiceFQDN}"
+          SERVER_FQDN: !Sub "${pServiceFQDN}"
           INSTANCE_ID: !Ref ServerInstance
 
   Ec2StartStopRule:
@@ -452,10 +484,64 @@ Resources:
       Action: lambda:invokeFunction
 
 
+  #
+  # SSM Commands
+  #
+  MSMCommandDocument:
+    Type: "AWS::SSM::Document"
+    Properties:
+      DocumentType: Command
+      Content:
+        schemaVersion: "2.2"
+        description: "executes an MSM command on a specific server"
+        parameters:
+          Server:
+            type: "String"
+            description: "Server Name"
+            default: !Ref pServerName
+          Command:
+            type: "String"
+            description: "MSM Command and params to execute"
+        mainSteps:
+        - action: "aws:runShellScript"
+          name: "msm"
+          inputs:
+            runCommand:
+            - "echo \"`date` /bin/msm {{Server}} {{Command}}\" >> /tmp/msm_commands.log"
+            - "tail -1 /tmp/msm_commands.log"
+            workingDirectory: "/home/ec2-user"
+
+  ExecScriptDocument:
+    Type: "AWS::SSM::Document"
+    Properties:
+      DocumentType: Command
+      Content:
+        schemaVersion: "2.2"
+        description: "executes a script on the minecraft instance"
+        parameters:
+          Command:
+            type: "String"
+            description: "Script and params to execute"
+        mainSteps:
+        - action: "aws:runShellScript"
+          name: "msm"
+          inputs:
+            runCommand:
+            - "echo \"`date` /home/ec2-user/scripts/{{Command}}\" >> /tmp/ssm_commands.log"
+            - "tail -1 /tmp/ssm_commands.log"
+            workingDirectory: "/home/ec2-user"
+
 
 Outputs:
-  StackName:
+  STACKNAME:
     Value: !Ref 'AWS::StackName'
-  PublicHostname:
-    Value: !Sub "${AWS::StackName}.{pServiceFQDN}"
-
+  SERVERHOSTNAME:
+    Value: !Sub "${pServiceFQDN}"
+  INSTANCEID:
+    Value: !Ref ServerInstance
+  MSMCOMMAND:
+    Value: !Ref MSMCommandDocument
+  EXECSCRIPT:
+    Value: !Ref ExecScriptDocument
+  BUCKET:
+    Value: !Ref pBucketName

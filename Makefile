@@ -64,12 +64,13 @@ cfn-upload: $(STACK_TEMPLATE)
 	aws s3 cp $(STACK_TEMPLATE) s3://$(BUCKET)/$(TEMPLATE_KEY)
 
 # Validate the template
-cfn-validate: cfn-upload $(STACK_TEMPLATE)
-	aws cloudformation validate-template --region $(AWS_DEFAULT_REGION) --template-url $(TEMPLATE_URL)
+cfn-validate: $(STACK_TEMPLATE)
+	aws cloudformation validate-template --region $(AWS_DEFAULT_REGION) --template-body file://$(STACK_TEMPLATE)
 
 # Deploy the stack
-cfn-deploy: cfn-validate $(manifest)
+cfn-deploy: cfn-validate cfn-upload $(manifest)
 	deploy_stack.rb -m $(manifest) --template-url $(TEMPLATE_URL) pLambdaZipFile=$(OBJECT_KEY) pBucketName=$(BUCKET)  --force
+	./bin/generate_config.sh $(STACK_NAME) > config.$(STACK_NAME)
 
 #
 # Lambda Targets

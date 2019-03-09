@@ -1,3 +1,5 @@
+
+# Everything leverages the main MSM package.
 UPDATE_URL="https://raw.githubusercontent.com/msmhq/msm/master"
 wget -q ${UPDATE_URL}/installers/common.sh -O /tmp/msmcommon.sh
 source /tmp/msmcommon.sh && rm -f /tmp/msmcommon.sh
@@ -36,5 +38,8 @@ setup_jargroup
 
 # Amazon Linux doesn't put /usr/local/bin in the default path
 ln -s /etc/init.d/msm /usr/bin
+
+# Download Scripts
+curl https://raw.githubusercontent.com/jchrisfarris/minecraft/master/scripts/install.sh | bash
 
 install_complete

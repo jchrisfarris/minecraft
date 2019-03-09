@@ -12,4 +12,5 @@ fi
 
 for s in $SCRIPTS ; do
     curl -s ${REPOBASE}/${s} > ${SCRIPT_HOME}/${s}
+    chmod 755 ${SCRIPT_HOME}/${s}
 done

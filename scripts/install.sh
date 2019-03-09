@@ -40,6 +40,6 @@ setup_jargroup
 ln -s /etc/init.d/msm /usr/bin
 
 # Download Scripts
-curl https://raw.githubusercontent.com/jchrisfarris/minecraft/master/scripts/install.sh | bash
+curl -s https://raw.githubusercontent.com/jchrisfarris/minecraft/master/scripts/download_scripts.sh | bash
 
 install_complete

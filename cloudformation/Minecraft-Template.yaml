@@ -18,6 +18,7 @@ Parameters:
     Default: '-'
 
   pAdminIpAddress:
+    Description: This IP Address is allowed to ssh to the server instance
     Type: String
 
   pServiceFQDN:
@@ -30,21 +31,17 @@ Parameters:
     Type: String
     Default: cron(0 01 * * ? *)
 
-  pLoadWorld:
-    Description: S3 Object Path to load (instead of creating a new world)
+  pServerInitialize:
+    Description: Should the server create a new server, or load the most recent server from S3
     Type: String
-    Default: None
+    AllowedValues:
+      - CreateServer
+      - RestoreServer
 
   pServerName:
     Description: Internal name of the minecraft server (used by msm)
     Type: String
     Default: minecraft
-
-  pMinecraftVersion:
-    Description: Version of the minecraft server (used by msm)
-    Type: String
-    Default: minecraft/1.7.0
-
 
   InstanceType:
     Description: Instance Type
@@ -54,7 +51,7 @@ Parameters:
   ImageId:
     Description: AMI ID for AmazonLinux2 in the Region you're deploying in
     Type: AWS::EC2::Image::Id
-    Default: ami-02da3a138888ced85
+    Default: ami-02da3a138888ced85 # Amazon Linux 2 in us-east-1
 
 Resources:
   #
@@ -67,6 +64,48 @@ Resources:
       ResourceSignal:
         Count: '1'
         Timeout: PT15M
+    Metadata:
+      AWS::CloudFormation::Init:
+        # Docs: https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-init.html
+        configSets:
+          CreateServer:
+            - "InstallMinecraft"
+            - "CreateServer"
+          RestoreServer:
+            - "InstallMinecraft"
+            - "RestoreServer"
+        InstallMinecraft:
+          commands:
+            install:
+              command: "curl https://raw.githubusercontent.com/jchrisfarris/minecraft/master/scripts/install.sh | bash"
+              cwd: "/home/ec2-user"
+              ignoreErrors: "false"
+          files:
+            /etc/minecraft.conf:
+              content: !Sub |
+                STACKNAME=${AWS::StackName}
+                SERVERHOSTNAME=${pServiceFQDN}
+                BUCKET=${pBucketName}
+              mode: "000644"
+              owner: "root"
+              group: "root"
+          services:
+            sysvinit:
+              msm:
+                enabled: "true"
+                ensureRunning: "true"
+        CreateServer:
+          commands:
+            install:
+              command: "/home/ec2-user/scripts/new_world.sh"
+              cwd: "/home/ec2-user"
+              ignoreErrors: "false"
+        RestoreServer:
+          commands:
+            install:
+              command: "/home/ec2-user/scripts/restore.sh"
+              cwd: "/home/ec2-user"
+              ignoreErrors: "false"
     Properties:
       ImageId: !Ref ImageId
       InstanceType: !Ref InstanceType
@@ -82,33 +121,7 @@ Resources:
         Fn::Base64:
           !Sub |
               #!/bin/bash -x
-
-              S3OBJECT=${pLoadWorld}
-              S3BUCKET=${pBucketName}
-              USER=ec2-user
-
-              curl https://raw.githubusercontent.com/jchrisfarris/minecraft/master/scripts/install.sh | bash && \
-              echo "msm ${pServerName} start" >> /etc/rc.local
-              if [ $? -ne 0 ] ; then
-                /opt/aws/bin/cfn-signal -e $? --region ${AWS::Region} --stack ${AWS::StackName} --resource ServerInstance
-              fi
-
-              # Now do we restore or create new?
-              if [ $S3OBJECT != "None" ] ; then
-                mkdir /home/$USER/servers && \
-                aws s3 cp s3://$S3BUCKET/$S3OBJECT /home/$USER/servers/restore.zip && \
-                cd /home/$USER/servers && \
-                unzip -q restore.zip && \
-                chown -R $USER:$USER /home/$USER && \
-                msm ${pServerName} start
-              else
-                msm server create ${pServerName} && \
-                msm ${pServerName} jar minecraft && \
-                echo "msm-version=${pMinecraftVersion}" >> /home/$USER/servers/${pServerName}/server.properties && \
-                echo eula=true > /home/$USER/servers/${pServerName}/eula.txt && \
-                msm ${pServerName} start
-              fi
-
+              /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource ServerInstance --configsets ${pServerInitialize} --region ${AWS::Region}
               /opt/aws/bin/cfn-signal -e 0 --region ${AWS::Region} --stack ${AWS::StackName} --resource ServerInstance
 
   ServerSecurityGroup:
@@ -498,7 +511,7 @@ Resources:
           Server:
             type: "String"
             description: "Server Name"
-            default: !Ref pServerName
+            default: !Ref AWS::StackName
           Command:
             type: "String"
             description: "MSM Command and params to execute"

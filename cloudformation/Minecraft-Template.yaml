@@ -1,5 +1,7 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: Deploy a Minecraft Server & Alexa Skill
+Transform: AWS::Serverless-2016-10-31
+
 
 Parameters:
 
@@ -10,12 +12,10 @@ Parameters:
   pKeyName:
     Description: KeyName for instances
     Type: AWS::EC2::KeyPair::KeyName
-    Default: '-'
 
   pHostedZoneId:
     Description: Hosted Zone ID to register the public IP
     Type: AWS::Route53::HostedZone::Id
-    Default: '-'
 
   pAdminIpAddress:
     Description: This IP Address is allowed to ssh to the server instance
@@ -24,12 +24,21 @@ Parameters:
   pServiceFQDN:
     Description: FQDN of the instance Host. domain name must match the Hosted Zone ID
     Type: String
-    Default: ''
 
   pBedtimeCron:
-    Description: Cron Expression in GMT
+    Description: Cron Expression in GMT for Shutdown
     Type: String
     Default: cron(0 01 * * ? *)
+
+  pStartCronWeekDay:
+    Description: Cron Expression in GMT for startup on a weekday
+    Type: String
+    Default: cron(0 17 ? * MON-FRI *)
+
+  pStartCronWeekEnd:
+    Description: Cron Expression in GMT for startup on a weekend
+    Type: String
+    Default: cron(0 17 ? * SAT,SUN *)
 
   pServerInitialize:
     Description: Should the server create a new server, or load the most recent server from S3
@@ -53,10 +62,36 @@ Parameters:
     Type: AWS::EC2::Image::Id
     Default: ami-02da3a138888ced85 # Amazon Linux 2 in us-east-1
 
+  pDefaultLambdaSize:
+    Description: Size to assign to all Lambda
+    Type: Number
+    Default: 512
+
+  pMaxLambdaDuration:
+    Description: How long to let the Lambda Run (in seconds)
+    Type: Number
+    Default: 80
+
+Globals:
+  Function:
+    Runtime: python3.7
+    MemorySize: !Ref pDefaultLambdaSize
+    Timeout: !Ref pMaxLambdaDuration
+    Environment:
+      Variables:
+          LOG_LEVEL: 'INFO'
+
+
 Resources:
   #
   # Server Instance itself
   #
+
+  StaticIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref ServerInstance
 
   ServerInstance:
     Type: AWS::EC2::Instance
@@ -157,7 +192,7 @@ Resources:
       HostedZoneId: !Ref pHostedZoneId
       Name: !Sub "${pServiceFQDN}"
       ResourceRecords:
-        - !GetAtt ServerInstance.PublicIp
+        - !Ref StaticIP
       TTL: 30
       Type: A
 
@@ -223,32 +258,6 @@ Resources:
             - s3:*
             Effect: Allow
 
-  LambdaInvocationRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-        - Effect: Allow
-          Principal:
-            Service:
-            - events.amazonaws.com
-            - sns.amazonaws.com
-          Action:
-          - sts:AssumeRole
-      Path: /
-      Policies:
-      - PolicyName: ExecuteLambda
-        PolicyDocument:
-          Version: '2012-10-17'
-          Statement:
-          - Action:
-            - lambda:InvokeFunction
-            Effect: Allow
-            Resource:
-              - !GetAtt DNSUpdateLambda.Arn
-              - !GetAtt StartStopServerLambda.Arn
-
   LambdaExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -310,14 +319,11 @@ Resources:
   # Automatic Server Shutdown at bedtime
   #
   StartStopServerLambda:
-    Type: AWS::Lambda::Function
+    Type: AWS::Serverless::Function
     Properties:
       Description: Update the DNS entry when the Minecraft server is started
-      Runtime: python3.7
       Handler: index.lambda_handler
-      Timeout: '80'
-      Code:
-        ZipFile: |
+      InlineCode: |
           import json
           import boto3
           from botocore.exceptions import ClientError
@@ -357,144 +363,26 @@ Resources:
           HOSTED_ZONE: !Ref pHostedZoneId
           SERVER_FQDN: !Sub "${AWS::StackName}.{pServiceFQDN}"
           INSTANCE_ID: !Ref ServerInstance
+      Events:
+        StopServer:
+          Type: Schedule
+          Properties:
+            Schedule: !Ref pBedtimeCron
+            Input:  !Sub |
+              {"command": "stop"}
+        StartWeekDay:
+          Type: Schedule
+          Properties:
+            Schedule: !Ref pStartCronWeekDay
+            Input:  !Sub |
+              {"command": "start"}
+        StartWeekEnd:
+          Type: Schedule
+          Properties:
+            Schedule: !Ref pStartCronWeekEnd
+            Input:  !Sub |
+              {"command": "start"}
 
-  ShutdownServerRule:
-    Type: "AWS::Events::Rule"
-    Properties:
-      Description: "Shutdown Minecraft Server at bedtime"
-      ScheduleExpression: !Ref pBedtimeCron
-      Targets:
-      - Arn: !GetAtt StartStopServerLambda.Arn
-        Id: TargetFunctionV1
-        Input:  !Sub |
-          {"command": "stop"}
-
-  ShutdownServerLambdaPermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !GetAtt StartStopServerLambda.Arn
-      Principal: events.amazonaws.com
-      SourceArn: !GetAtt ShutdownServerRule.Arn
-      Action: lambda:invokeFunction
-
-  #
-  # Resources to set DNS on Instance Start
-  #
-  DNSUpdateLambda:
-    Type: AWS::Lambda::Function
-    Properties:
-      Description: Update the DNS entry when the Minecraft server is started or stopped
-      Runtime: python3.7
-      Handler: index.lambda_handler
-      Timeout: '80'
-      Code:
-        ZipFile: |
-          import json
-          import boto3
-          from botocore.exceptions import ClientError
-          import sys
-          import os
-
-          import logging
-          logger = logging.getLogger()
-          logger.setLevel(logging.DEBUG)
-          # Quiet Boto3
-          logging.getLogger('botocore').setLevel(logging.WARNING)
-          logging.getLogger('boto3').setLevel(logging.WARNING)
-
-          def lambda_handler(event, context):
-              logger.debug("Received event: " + json.dumps(event, sort_keys=True))
-
-              ec2_client = boto3.client('ec2')
-              route53_client = boto3.client('route53')
-              instance_id = os.environ['INSTANCE_ID']
-
-              try:
-                if event['detail']['instance-id'] != instance_id:
-                  return(event) # Nothing to Do here
-
-                if event['detail']['state'] == "running" and :
-                  instance_deets = ec2_client.describe_instances(InstanceIds=[instance_id])['Reservations']['Instances'][0]
-                  if 'PublicIpAddress' not in instance_deets:
-                    raise Exception("No Public IP for Instance")
-                  else:
-                    response = route53_client.change_resource_record_sets(
-                      HostedZoneId=os.environ['HOSTED_ZONE'],
-                      ChangeBatch={
-                        'Changes': [
-                          {
-                            'Action':'UPSERT',
-                            'ResourceRecordSet': {
-                              'Name': os.environ['SERVER_FQDN'],
-                              'Type': 'A',
-                              'TTL': 30,
-                              'ResourceRecords': [{'Value': instance_deets['PublicIpAddress']}]
-                            }
-                          }
-                        ]
-                      }
-                    )
-                    logger.info(response)
-                    return(event)
-
-                if event['detail']['state'] == "stopping":
-                  instance_deets = ec2_client.describe_instances(InstanceIds=[instance_id])['Reservations']['Instances'][0]
-                  if 'PublicIpAddress' not in instance_deets:
-                    raise Exception("No Public IP for Instance")
-                  else:
-                    response = route53_client.change_resource_record_sets(
-                      HostedZoneId=os.environ['HOSTED_ZONE'],
-                      ChangeBatch={
-                        'Changes': [
-                          {
-                            'Action':'DELETE',
-                            'ResourceRecordSet': {
-                              'Name': os.environ['SERVER_FQDN'],
-                              'Type': 'A',
-                              'TTL': 30,
-                              'ResourceRecords': [{'Value': instance_deets['PublicIpAddress']}]
-                            }
-                          }
-                        ]
-                      }
-                    )
-                    logger.info(response)
-                    return(event)
-
-
-              except KeyError as e:
-                logger.error(f"KeyError: {e}")
-          ### End Of Function ###
-
-      Role: !GetAtt LambdaExecutionRole.Arn
-      Environment:
-        Variables:
-          HOSTED_ZONE: !Ref pHostedZoneId
-          SERVER_FQDN: !Sub "${pServiceFQDN}"
-          INSTANCE_ID: !Ref ServerInstance
-
-  Ec2StartStopRule:
-    Type: AWS::Events::Rule
-    Properties:
-      Description: Send Instance State Change notifications to Slack (via Lambda)
-      EventPattern:
-        source:
-        - aws.ec2
-        detail-type:
-        - EC2 Instance State-change Notification
-      State: ENABLED
-      RoleArn: !GetAtt LambdaInvocationRole.Arn
-      Targets:
-      - Arn: !GetAtt DNSUpdateLambda.Arn
-        Id: TargetFunctionV1
-
-  DNSUpdateLambdaPermissionEc2StartStopRule:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !GetAtt DNSUpdateLambda.Arn
-      Principal: events.amazonaws.com
-      SourceArn: !GetAtt Ec2StartStopRule.Arn
-      Action: lambda:invokeFunction
 
 
   #
@@ -550,6 +438,8 @@ Outputs:
     Value: !Ref 'AWS::StackName'
   SERVERHOSTNAME:
     Value: !Sub "${pServiceFQDN}"
+  SERVERIP:
+    Value: !Ref StaticIP
   INSTANCEID:
     Value: !Ref ServerInstance
   MSMCOMMAND:

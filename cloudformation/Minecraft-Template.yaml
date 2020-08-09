@@ -94,6 +94,9 @@ Globals:
     Environment:
       Variables:
           LOG_LEVEL: 'INFO'
+          BUCKET: !Ref pBucketName
+          SERVER_FQDN: !Sub "${AWS::StackName}.${pServiceFQDN}"
+          INSTANCE_ID: !Ref ServerInstance
 
 Conditions:
   cDeployAlexa: !Not [ !Equals [ !Ref pAlexaClientSecret, "NONE"] ]
@@ -327,6 +330,7 @@ Resources:
           - Action:
             - ec2:StopInstances
             - ec2:StartInstances
+            - ssm:SendCommand
             Effect: Allow
             Resource:
               - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${ServerInstance}
@@ -339,6 +343,18 @@ Resources:
             Effect: Allow
             Resource:
               - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-start-stop
+      - PolicyName: SSMCommands
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Action:
+            - ssm:SendCommand
+            Effect: Allow
+            Resource:
+              - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:document/${ExecScriptDocument}
+              - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:document/${MSMCommandDocument}
+              - !Sub arn:aws:s3:::${pBucketName}/ssm_commands
+
 
   S3BucketReadRole:
     Condition: cDeployAlexa
@@ -373,49 +389,14 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub "${AWS::StackName}-start-stop"
-      Description: Update the DNS entry when the Minecraft server is started
-      Handler: index.lambda_handler
-      InlineCode: |
-          import json
-          import boto3
-          from botocore.exceptions import ClientError
-          import sys
-          import os
-
-          import logging
-          logger = logging.getLogger()
-          logger.setLevel(getattr(logging, os.getenv('LOG_LEVEL', default='INFO')))
-          logging.getLogger('botocore').setLevel(logging.WARNING)
-          logging.getLogger('boto3').setLevel(logging.WARNING)
-          logging.getLogger('urllib3').setLevel(logging.WARNING)
-
-          def lambda_handler(event, context):
-              # logger.debug("Received event: " + json.dumps(event, sort_keys=True))
-              # message = json.loads(event['Records'][0]['Sns']['Message'])
-              message = event
-              logger.info("Received message: " + json.dumps(message, sort_keys=True))
-
-              client = boto3.client('ec2')
-              instance_id = os.environ['INSTANCE_ID']
-
-              if message['command'] == "stop":
-                # TODO Make this an cleaner SSM shutdown command
-                logger.info(f"Stopping Instance {os.environ['INSTANCE_ID']}")
-                response = client.stop_instances(InstanceIds=[instance_id])
-                logger.debug(response)
-              elif message['command'] == "start":
-                logger.info(f"Starting Instance {os.environ['INSTANCE_ID']}")
-                response = client.start_instances(InstanceIds=[instance_id])
-                logger.debug(response)
-              else:
-                logger.error(f"Invalid Command {message['command']}")
-          ### End Of Function ###
+      Description: Process commands to the Minecraft Server
+      Handler: command.lambda_handler
+      CodeUri: ../lambda
       Role: !GetAtt LambdaExecutionRole.Arn
       Environment:
         Variables:
-          HOSTED_ZONE: !Ref pHostedZoneId
-          SERVER_FQDN: !Sub "${AWS::StackName}.${pServiceFQDN}"
-          INSTANCE_ID: !Ref ServerInstance
+          EXECSCRIPT: !Ref ExecScriptDocument
+          MSMCOMMAND: !Ref MSMCommandDocument
       Events:
         StopServer:
           Type: Schedule
@@ -461,6 +442,7 @@ Resources:
             runCommand:
             - "echo \"`date` /bin/msm {{Server}} {{Command}}\" >> /tmp/msm_commands.log"
             - "tail -1 /tmp/msm_commands.log"
+            - "/bin/msm {{Server}} {{Command}}"
             workingDirectory: "/home/ec2-user"
 
   ExecScriptDocument:
@@ -481,6 +463,7 @@ Resources:
             runCommand:
             - "echo \"`date` /home/ec2-user/scripts/{{Command}}\" >> /tmp/ssm_commands.log"
             - "tail -1 /tmp/ssm_commands.log"
+            - "/home/ec2-user/scripts/{{Command}}"
             workingDirectory: "/home/ec2-user"
 
   #
@@ -497,9 +480,6 @@ Resources:
       Role: !GetAtt LambdaExecutionRole.Arn
       Environment:
         Variables:
-          HOSTED_ZONE: !Ref pHostedZoneId
-          SERVER_FQDN: !Sub "${AWS::StackName}.${pServiceFQDN}"
-          INSTANCE_ID: !Ref ServerInstance
           CONTROL_LAMBDA: !GetAtt StartStopServerLambda.Arn
       Events:
         AlexaSkill:

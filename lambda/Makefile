@@ -6,6 +6,7 @@ PIP=pip3
 
 # Files are required when doing a make update
 FILES=	alexa_skill.py \
+		command.py \
 		utils.py
 
 JUNK=HISTORY.rst LICENSE NOTICE README.rst bin certifi requests chardet requests_aws4auth elasticsearch urllib3 idna mako markupsafe

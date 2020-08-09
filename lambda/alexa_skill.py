@@ -46,6 +46,42 @@ def invoke_control_lambda(payload):
         logger.error(f"Error invoking {json.dumps(payload)} for {os.environ['CONTROL_LAMBDA']}: {response['FunctionError']}")
         return(False)
 
+# restart the Minecraft process
+class RestartServerIntentHandler(AbstractRequestHandler):
+    """Handler for Hello World Intent."""
+    def can_handle(self, handler_input):
+        # type: (HandlerInput) -> bool
+        return ask_utils.is_intent_name("RestartServer")(handler_input)
+
+    def handle(self, handler_input):
+        # type: (HandlerInput) -> Response
+        # Do stuff
+        payload = {"command": "restart"}
+        if invoke_control_lambda(payload) is True:
+            speak_output = "Restarting Minecraft!"
+            card_text = f"Restarting Minecraft Server {os.environ['INSTANCE_ID']} at {os.environ['SERVER_FQDN']}"
+        else:
+            speak_output = "Error attempting to restart the Server!"
+            card_text = f"Error attempting to restart the Server {os.environ['INSTANCE_ID']} at {os.environ['SERVER_FQDN']}"
+
+        return (
+            handler_input.response_builder
+                .speak(speak_output)
+                .set_card(
+                        ui.StandardCard(
+                            title=speak_output,
+                            text=card_text,
+                            # image=ui.Image(
+                            #     small_image_url="<Small Image URL>",
+                            #     large_image_url="<Large Image URL>"
+                            # )
+                        )
+                    )
+                # .ask("add a reprompt if you want to keep the session open for the user to respond")
+                .response
+        )
+sb.add_request_handler(RestartServerIntentHandler())
+
 
 # Start the Server
 class StartServerIntentHandler(AbstractRequestHandler):

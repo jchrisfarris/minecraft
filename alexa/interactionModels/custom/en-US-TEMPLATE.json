@@ -41,6 +41,16 @@
                         "boot",
                         "boot up"
                     ]
+                },
+                {
+                    "name": "RestartServer",
+                    "slots": [],
+                    "samples": [
+                        "restart the minecraft server",
+                        "tell minecraft server to restart",
+                        "tell minecraft to restart",
+                        "restart"
+                    ]
                 }
             ],
             "types": []

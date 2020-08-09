@@ -16,6 +16,22 @@ config.*
 
 # Manifests are inputs to Cloudformation. They contain deploy specific things (like payer accounts)
 *Manifest.yaml
+cloudformation/*Transformed*.yaml
+
+lambda/ask*
+lambda/boto*
+lambda/docutils*
+alexa/interactionModels/custom/en-US.json
+lambda/six.py
+lambda/urllib3/*
+lambda/s3transfer/*
+lambda/bin/*
+lambda/certifi/*
+lambda/chardet/*
+lambda/dateutil/*
+lambda/idna/*
+lambda/requests/*
+lambda/jmespath/*
 
 # Test events also contain sensitive datad
 *test-events/*
@@ -152,4 +168,6 @@ ENV/
 
 
 # End of https://www.gitignore.io/api/osx,python
+
+
 

@@ -1,15 +1,14 @@
 
-ifndef STACK_NAME
+ifndef env
 # $(error env is not set)
-	STACK_NAME ?= minecraft
+	env ?= dev
 endif
 
-ifdef CONFIG
-	include $(CONFIG)
-	export
-else
-	include config.$(STACK_NAME)
-	export
+include config.$(env)
+export
+
+ifndef MAIN_STACK_NAME
+	$(error MAIN_STACK_NAME is not set)
 endif
 
 ifndef BUCKET
@@ -20,25 +19,20 @@ ifndef version
 	export version := $(shell date +%Y%b%d-%H%M)
 endif
 
-
 # Filename for the CFT to deploy
-export STACK_TEMPLATE=cloudformation/Minecraft-Template.yaml
+export DEPLOY_PREFIX=deploy-packages
+export TEMPLATE=cloudformation/Minecraft-Template.yaml
+OUTPUT_TEMPLATE_PREFIX=Minecraft-Template-Transformed
+OUTPUT_TEMPLATE=$(OUTPUT_TEMPLATE_PREFIX)-$(version).yaml
+TEMPLATE_URL ?= https://s3.amazonaws.com/$(BUCKET)/$(DEPLOY_PREFIX)/$(OUTPUT_TEMPLATE)
+CONFIG_PREFIX=config-files
 
-# Name of the Zip file with all the function code and dependencies
-export LAMBDA_PACKAGE=$(STACK_NAME)-lambda-$(version).zip
+export LAMBDA_PACKAGE=$(MAIN_STACK_NAME)-lambda-$(version).zip
+export SKILL_PACKAGE=$(MAIN_STACK_NAME)-skill-$(version).zip
 
-# Name of the manifest file.
-export manifest=cloudformation/$(STACK_NAME)-Manifest.yaml
-
-# location in the Antiope bucket where we drop lambda-packages
-export OBJECT_KEY=deploy-packages/$(LAMBDA_PACKAGE)
-
-# For uploading CFT to S3
-export TEMPLATE_KEY ?= deploy-packages/$(STACK_NAME)-Template-$(version).yaml
-export TEMPLATE_URL ?= https://s3.amazonaws.com/$(BUCKET)/$(TEMPLATE_KEY)
 
 # List of all the functions deployed by this stack. Required for "make update" to work.
-FUNCTIONS = $(STACK_NAME)-pull-organization-data
+FUNCTIONS = $(MAIN_STACK_NAME)-alexa-handler
 
 .PHONY: $(FUNCTIONS)
 
@@ -46,46 +40,96 @@ FUNCTIONS = $(STACK_NAME)-pull-organization-data
 test: cfn-validate
 	cd lambda && $(MAKE) test
 
-# Do everything
-deploy: cfn-deploy
+deps:
+	cd lambda && $(MAKE) deps
 
+skill:
+	cd alexa && $(MAKE) package
+
+#
+# Deploy New Code Targets
+#
+
+# Deploy a fresh version of code
+deploy: cft-validate package cft-deploy push-config
+
+package: deps
+	@aws cloudformation package --template-file $(TEMPLATE) --s3-bucket $(BUCKET) --s3-prefix $(DEPLOY_PREFIX)/transform --output-template-file cloudformation/$(OUTPUT_TEMPLATE)  --metadata build_ver=$(version)
+	@aws s3 cp cloudformation/$(OUTPUT_TEMPLATE) s3://$(BUCKET)/$(DEPLOY_PREFIX)/
+# 	rm cloudformation/$(OUTPUT_TEMPLATE)
+
+cft-deploy: skill package
+ifndef MANIFEST
+	$(error MANIFEST is not set)
+endif
+	cft-deploy -m cloudformation/$(MANIFEST) --template-url $(TEMPLATE_URL) pTemplateURL=$(TEMPLATE_URL) pBucketName=$(BUCKET) pSkillPackage=$(DEPLOY_PREFIX)/$(SKILL_PACKAGE) --force
+
+
+#
+# Promote Existing Code Targets
+#
+
+# promote an existing stack to a new environment
+# Assumes cross-account access to the lower environment's DEPLOY_PREFIX
+promote: cft-promote push-config
+
+cft-promote:
+ifndef MANIFEST
+	$(error MANIFEST is not set)
+endif
+ifndef template
+	$(error template is not set)
+endif
+ifndef skill
+	$(error skill is not set)
+endif
+	cft-deploy -m cloudformation/$(MANIFEST) --template-url $(template) pTemplateURL=$(template) pBucketName=$(BUCKET) pSkillPackage=$(skill) --force
+
+
+#
+# Testing & Cleanup Targets
+#
+# Validate all the CFTs. Inventory is so large it can only be validated from S3
+cft-validate:
+	cft-validate -t $(TEMPLATE)
+
+
+# Clean up dev artifacts
 clean:
 	cd lambda && $(MAKE) clean
+	cd alexa && $(MAKE) clean
+	rm cloudformation/$(OUTPUT_TEMPLATE_PREFIX)*
+
+pep8:
+	cd lambda && $(MAKE) pep8
+
+cft-validate-manifest: cft-validate
+	cft-validate-manifest --region $(AWS_DEFAULT_REGION) -m cloudformation/$(MANIFEST) --template-url $(TEMPLATE_URL) pBucketName=$(BUCKET)
 
 #
-# Cloudformation Targets
+# Management Targets
 #
 
+# target to generate a manifest file. Only do this once
+# we use a lowercase manifest to force the user to specify on the command line and not overwrite existing one
 manifest:
-	deploy_stack.rb -g $(STACK_TEMPLATE) > $(manifest)
+ifndef manifest
+	$(error manifest is not set)
+endif
+	cft-generate-manifest -t $(TEMPLATE) -m cloudformation/$(manifest) --stack-name $(MAIN_STACK_NAME) --region $(AWS_DEFAULT_REGION)
 
-# Upload template to S3
-cfn-upload: $(STACK_TEMPLATE)
-	aws s3 cp $(STACK_TEMPLATE) s3://$(BUCKET)/$(TEMPLATE_KEY)
+push-config:
+	@aws s3 cp cloudformation/$(MANIFEST) s3://$(BUCKET)/${CONFIG_PREFIX}/$(MANIFEST)
 
-# Validate the template
-cfn-validate: $(STACK_TEMPLATE)
-	aws cloudformation validate-template --region $(AWS_DEFAULT_REGION) --template-body file://$(STACK_TEMPLATE)
-
-# Deploy the stack
-cfn-deploy: cfn-validate cfn-upload $(manifest)
-	deploy_stack.rb -m $(manifest) --template-url $(TEMPLATE_URL) pLambdaZipFile=$(OBJECT_KEY) pBucketName=$(BUCKET)  --force
-	./bin/generate_config.sh $(STACK_NAME) > config.$(STACK_NAME)
 
 #
-# Lambda Targets
+# Rapid Development Targets
 #
-package:
-	cd lambda && $(MAKE) package
-
 zipfile:
 	cd lambda && $(MAKE) zipfile
 
-upload: package
-	aws s3 cp lambda/$(LAMBDA_PACKAGE) s3://$(BUCKET)/$(OBJECT_KEY)
-
 # # Update the Lambda Code without modifying the CF Stack
-update: package $(FUNCTIONS)
+update: zipfile $(FUNCTIONS)
 	for f in $(FUNCTIONS) ; do \
 	  aws lambda update-function-code --function-name $$f --zip-file fileb://lambda/$(LAMBDA_PACKAGE) ; \
 	done
@@ -93,10 +137,6 @@ update: package $(FUNCTIONS)
 # Update one specific function. Called as "make fupdate function=<fillinstackprefix>-aws-inventory-ecs-inventory"
 fupdate: zipfile
 	aws lambda update-function-code --function-name $(function) --zip-file fileb://lambda/$(LAMBDA_PACKAGE) ; \
-
-#
-# Management Targets
-#
 
 purge-logs:
 	for f in $(FUNCTIONS) ; do \
@@ -107,3 +147,5 @@ expire-logs:
 	for f in $(FUNCTIONS) ; do \
 	  aws logs put-retention-policy --log-group-name /aws/lambda/$$f --retention-in-days 5 ; \
 	done
+
+

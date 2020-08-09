@@ -1,0 +1,49 @@
+{
+    "interactionModel": {
+        "languageModel": {
+            "invocationName": "minecraft server",
+            "intents": [
+                {
+                    "name": "AMAZON.CancelIntent",
+                    "samples": []
+                },
+                {
+                    "name": "AMAZON.HelpIntent",
+                    "samples": []
+                },
+                {
+                    "name": "AMAZON.StopIntent",
+                    "samples": []
+                },
+                {
+                    "name": "AMAZON.NavigateHomeIntent",
+                    "samples": []
+                },
+                {
+                    "name": "StopServer",
+                    "slots": [],
+                    "samples": [
+                        "Tell minecraft server to shutdown",
+                        "Shutdown Minecraft Server",
+                        "Stop MineCraft Server",
+                        "stop",
+                        "shutdown"
+                    ]
+                },
+                {
+                    "name": "StartServer",
+                    "slots": [],
+                    "samples": [
+                        "start up the minecraft server",
+                        "tell minecraft server to start",
+                        "tell minecraft to startup",
+                        "start",
+                        "boot",
+                        "boot up"
+                    ]
+                }
+            ],
+            "types": []
+        }
+    }
+}

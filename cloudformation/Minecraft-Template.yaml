@@ -9,6 +9,10 @@ Parameters:
     Description: S3 Bucket with Backups & logs
     Type: String
 
+  pTemplateURL:
+    Description: URL of the transformed Template
+    Type: String
+
   pKeyName:
     Description: KeyName for instances
     Type: AWS::EC2::KeyPair::KeyName
@@ -65,12 +69,22 @@ Parameters:
   pDefaultLambdaSize:
     Description: Size to assign to all Lambda
     Type: Number
-    Default: 512
+    Default: 3006
 
   pMaxLambdaDuration:
     Description: How long to let the Lambda Run (in seconds)
     Type: Number
-    Default: 80
+    Default: 90
+
+  pAlexaClientSecret:
+    Description: Login With Amazon Client ID required for deploying Skill from https://developer.amazon.com/loginwithamazon/console/site/lwa/overview.html
+    Type: String
+    Default: NONE
+
+  pSkillPackage:
+    Description: Skill Package to Deploy
+    Type: String
+
 
 Globals:
   Function:
@@ -81,6 +95,8 @@ Globals:
       Variables:
           LOG_LEVEL: 'INFO'
 
+Conditions:
+  cDeployAlexa: !Not [ !Equals [ !Ref pAlexaClientSecret, "NONE"] ]
 
 Resources:
   #
@@ -314,13 +330,49 @@ Resources:
             Effect: Allow
             Resource:
               - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${ServerInstance}
+      - PolicyName: InvokeLambda
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Action:
+            - lambda:InvokeFunction
+            Effect: Allow
+            Resource:
+              - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-start-stop
 
+  S3BucketReadRole:
+    Condition: cDeployAlexa
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - alexa-appkit.amazon.com
+          Action:
+          - sts:AssumeRole
+      Path: /
+      Policies:
+      - PolicyName: SkillDeploymentPermission
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Action:
+            - s3:Get*
+            - s3:List*
+            Effect: Allow
+            Resource:
+            - !Sub arn:aws:s3:::${pBucketName}
+            - !Sub arn:aws:s3:::${pBucketName}/*
   #
   # Automatic Server Shutdown at bedtime
   #
   StartStopServerLambda:
     Type: AWS::Serverless::Function
     Properties:
+      FunctionName: !Sub "${AWS::StackName}-start-stop"
       Description: Update the DNS entry when the Minecraft server is started
       Handler: index.lambda_handler
       InlineCode: |
@@ -332,10 +384,10 @@ Resources:
 
           import logging
           logger = logging.getLogger()
-          logger.setLevel(logging.DEBUG)
-          # Quiet Boto3
+          logger.setLevel(getattr(logging, os.getenv('LOG_LEVEL', default='INFO')))
           logging.getLogger('botocore').setLevel(logging.WARNING)
           logging.getLogger('boto3').setLevel(logging.WARNING)
+          logging.getLogger('urllib3').setLevel(logging.WARNING)
 
           def lambda_handler(event, context):
               # logger.debug("Received event: " + json.dumps(event, sort_keys=True))
@@ -347,6 +399,7 @@ Resources:
               instance_id = os.environ['INSTANCE_ID']
 
               if message['command'] == "stop":
+                # TODO Make this an cleaner SSM shutdown command
                 logger.info(f"Stopping Instance {os.environ['INSTANCE_ID']}")
                 response = client.stop_instances(InstanceIds=[instance_id])
                 logger.debug(response)
@@ -361,7 +414,7 @@ Resources:
       Environment:
         Variables:
           HOSTED_ZONE: !Ref pHostedZoneId
-          SERVER_FQDN: !Sub "${AWS::StackName}.{pServiceFQDN}"
+          SERVER_FQDN: !Sub "${AWS::StackName}.${pServiceFQDN}"
           INSTANCE_ID: !Ref ServerInstance
       Events:
         StopServer:
@@ -382,8 +435,6 @@ Resources:
             Schedule: !Ref pStartCronWeekEnd
             Input:  !Sub |
               {"command": "start"}
-
-
 
   #
   # SSM Commands
@@ -432,6 +483,53 @@ Resources:
             - "tail -1 /tmp/ssm_commands.log"
             workingDirectory: "/home/ec2-user"
 
+  #
+  # Alexa fun
+  #
+  AlexaSkillHandlerFunction:
+    Condition: cDeployAlexa
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-alexa-handler"
+      Description: Handle Alexa Intents for this Minecraft Server
+      Handler: alexa_skill.lambda_handler
+      CodeUri: ../lambda
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          HOSTED_ZONE: !Ref pHostedZoneId
+          SERVER_FQDN: !Sub "${AWS::StackName}.${pServiceFQDN}"
+          INSTANCE_ID: !Ref ServerInstance
+          CONTROL_LAMBDA: !GetAtt StartStopServerLambda.Arn
+      Events:
+        AlexaSkill:
+          Type: AlexaSkill
+          Properties:
+             SkillId: !Ref MinecraftSkill
+
+  MinecraftSkill:
+    Type: "Alexa::ASK::Skill"
+    Condition: cDeployAlexa
+    Properties:
+      SkillPackage:
+        S3Bucket: !Ref pBucketName
+        S3Key: !Ref pSkillPackage
+        S3BucketRole: !GetAtt S3BucketReadRole.Arn
+        Overrides:
+          Manifest:
+            apis:
+              custom:
+                endpoint:
+                  uri: !GetAtt AlexaSkillHandlerFunction.Arn
+            publishingInformation:
+              locales:
+                en-US:
+                  name: !Sub "Alexa Skill for ${AWS::StackName}"
+      AuthenticationConfiguration:
+        ClientId: !Join ['', ['{{resolve:secretsmanager:', !Ref pAlexaClientSecret, ':SecretString:client_id}}' ]]
+        ClientSecret: !Join ['', ['{{resolve:secretsmanager:', !Ref pAlexaClientSecret, ':SecretString:client_secret}}' ]]
+        RefreshToken: !Join ['', ['{{resolve:secretsmanager:', !Ref pAlexaClientSecret, ':SecretString:refresh_token}}' ]]
+      VendorId:  !Join ['', ['{{resolve:secretsmanager:', !Ref pAlexaClientSecret, ':SecretString:vendor_id}}' ]]
 
 Outputs:
   STACKNAME:
@@ -448,3 +546,10 @@ Outputs:
     Value: !Ref ExecScriptDocument
   BUCKET:
     Value: !Ref pBucketName
+  TemplateURL:
+    Value: !Ref pTemplateURL
+  SkillPackage:
+    Value: !Ref pSkillPackage
+  SkillURL:
+    Value: !Sub "https://developer.amazon.com/alexa/console/ask/build/custom/${MinecraftSkill}/development/en_US/dashboard"
+

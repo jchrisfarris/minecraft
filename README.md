@@ -91,3 +91,31 @@ Due to a bug, the Lambda Override lines in the CFT must be disabled when the ski
 ```
 
 The Alexa Skill resource will validate that the skill can invoke the Lambda function. However until the skill is created, the Lambda invocation role doesn't have the skill ID. You can create the skill w/o the custom endpoint, then once the skill ID is on the lambda function, update the skill to push the custom endpoint.
+
+## Future To Do
+
+### Server Management
+1. export /home/ec2-user/servers/minecraft/logs/latest.log to Cloudwatch Logs
+2. export /home/ec2-user/servers/minecraft/logs/ to S3
+3. Import a server properties file from S3 on initial create
+4. CFT param to disable the CloudWatch event that start instance
+
+### Alexa Intents
+
+MSM Commands:
+1.  `<server> op add|remove <player> ` Add/remove operator status for a player on a server
+1.  `<server> op list ` Lists the operator players for a server
+1.  `<server> gm survival|creative <player> ` Change the game mode for a player on a server
+1.  `<server> kick <player> ` Forcibly disconnect a player from a server
+1.  `<server> say <message> ` Broadcast a (pink) message to all players on a server
+1.  `<server> time set|add <number> ` Set/increment time on a server (0-24000)
+1.  `<server> toggledownfall ` Toggles rain and snow on a server
+1.  `<server> xp <player> <amount> ` Gives XP to, or takes away (when negative) XP from, a player
+
+
+`alexa set time to morning` -> `server time set 6000`
+`alexa set time to evening` -> `server time set 18000`
+`alexa op chrisatroom17` -> `server op chrisatroom17`
+
+time set day midnight night noon
+

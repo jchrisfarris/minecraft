@@ -20,6 +20,7 @@ Parameters:
   pHostedZoneId:
     Description: Hosted Zone ID to register the public IP
     Type: AWS::Route53::HostedZone::Id
+    Default: NONE
 
   pAdminIpAddress:
     Description: This IP Address is allowed to ssh to the server instance
@@ -95,11 +96,13 @@ Globals:
       Variables:
           LOG_LEVEL: 'INFO'
           BUCKET: !Ref pBucketName
-          SERVER_FQDN: !Sub "${AWS::StackName}.${pServiceFQDN}"
+          SERVER_FQDN: !Sub "${pServiceFQDN}"
           INSTANCE_ID: !Ref ServerInstance
 
 Conditions:
   cDeployAlexa: !Not [ !Equals [ !Ref pAlexaClientSecret, "NONE"] ]
+  cRoute53: !Not [ !Equals [ !Ref pHostedZoneId, "NONE"] ]
+
 
 Resources:
   #
@@ -207,6 +210,7 @@ Resources:
   DNSRecord:
     # We need this to create the DNS record when the instance is first created.
     Type: AWS::Route53::RecordSet
+    Condition: cRoute53
     Properties:
       HostedZoneId: !Ref pHostedZoneId
       Name: !Sub "${pServiceFQDN}"
@@ -354,7 +358,6 @@ Resources:
               - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:document/${ExecScriptDocument}
               - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:document/${MSMCommandDocument}
               - !Sub arn:aws:s3:::${pBucketName}/ssm_commands
-
 
   S3BucketReadRole:
     Condition: cDeployAlexa

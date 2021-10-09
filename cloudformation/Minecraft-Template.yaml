@@ -19,7 +19,7 @@ Parameters:
 
   pHostedZoneId:
     Description: Hosted Zone ID to register the public IP
-    Type: AWS::Route53::HostedZone::Id
+    Type: String
     Default: NONE
 
   pAdminIpAddress:
@@ -529,10 +529,14 @@ Outputs:
     Value: !Ref ExecScriptDocument
   BUCKET:
     Value: !Ref pBucketName
+  SecurityGroup:
+    Value: !GetAtt ServerSecurityGroup.GroupId
   TemplateURL:
     Value: !Ref pTemplateURL
   SkillPackage:
+    Condition: cDeployAlexa
     Value: !Ref pSkillPackage
   SkillURL:
+    Condition: cDeployAlexa
     Value: !Sub "https://developer.amazon.com/alexa/console/ask/build/custom/${MinecraftSkill}/development/en_US/dashboard"
 
